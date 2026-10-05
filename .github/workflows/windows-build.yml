@@ -1,0 +1,72 @@
+name: Test and build Loki
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m ruff check .
+      - run: python -m pytest -q
+      - run: python -m loki --smoke-test --data-dir .smoke-data
+
+  windows-build:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Build standalone application and smoke-test executable
+        shell: pwsh
+        run: ./build.ps1 -SkipTests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Loki-Windows
+          path: dist/Loki-Windows.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: windows-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Loki-Windows
+          path: package
+      - name: Publish tested Windows package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_COMMIT: ${{ github.sha }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          printf '%s\n' 'Extract the entire Loki folder, open Loki.exe, and calibrate the Run WHO button.' 'Python is not needed. Detection and notifications only; all clicks are manual.' > release-notes.txt
+          gh release create "build-${BUILD_NUMBER}" package/Loki-Windows.zip \
+            --target "$BUILD_COMMIT" --title "Loki 0.1.0 (build ${BUILD_NUMBER})" \
+            --notes-file release-notes.txt --latest
+

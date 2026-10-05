@@ -1,0 +1,6 @@
+# Qt Essentials supplies Widgets/Core/Gui without the large Qt Addons package.
+PySide6-Essentials==6.11.2
+opencv-python-headless==4.14.0.94
+numpy==2.3.5
+mss==10.2.0
+
