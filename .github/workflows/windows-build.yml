@@ -12,6 +12,7 @@ permissions:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -23,6 +24,11 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+      - name: Install Qt runtime libraries on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m ruff check .
       - run: python -m pytest -q
@@ -69,4 +75,3 @@ jobs:
           gh release create "build-${BUILD_NUMBER}" package/Loki-Windows.zip \
             --target "$BUILD_COMMIT" --title "Loki 0.1.0 (build ${BUILD_NUMBER})" \
             --notes-file release-notes.txt --latest
-
