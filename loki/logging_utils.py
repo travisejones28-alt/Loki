@@ -42,7 +42,7 @@ def save_debug_image(paths: AppPaths, frame, result: DetectionResult, origin, ma
     )
     cv2.putText(
         annotated,
-        f"Run WHO {result.confidence:.3f}",
+        f"Target {result.confidence:.3f}",
         (max(0, x), max(18, y - 8)),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,

@@ -36,7 +36,7 @@ desktop capture and the highlight can see it. Exclusive fullscreen can prevent b
 1. Open the **VoidLink WHO Request** popup in WoW. Leave **Run WHO** visible.
 2. Open Loki and select **Calibrate**.
 3. Choose the monitor containing WoW. No pixel coordinates need to be typed.
-4. Select **Select area and Run WHO button**. Loki hides its windows for 0.9 seconds,
+4. Select **Select area and target**. Loki hides its windows for 0.9 seconds,
    then shows a frozen image of that monitor. Keep the pointer off the button during capture.
 5. Drag a small search rectangle containing the popup. It can include enough surrounding
    space for the popup to move slightly. Press Escape to cancel.

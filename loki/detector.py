@@ -71,11 +71,11 @@ class TemplateDetector:
             self.height, self.width = self.template.shape
             if self.width < 8 or self.height < 8 or self.width * self.height > 500_000:
                 raise DetectionError(
-                    "Select the full Run WHO button, between 8 pixels and 500,000 pixels in area."
+                    "Select the complete visual target, between 8 pixels and 500,000 pixels in area."
                 )
             if float(self.template.std()) < 8:
                 raise DetectionError(
-                    "The selected template has too little detail. Include the Run WHO text and button edges."
+                    "The selected template has too little detail. Include distinctive text and target edges."
                 )
             self.context = grayscale(context) if context is not None else None
             if self.context is not None:

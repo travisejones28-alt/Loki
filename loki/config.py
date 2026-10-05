@@ -165,7 +165,7 @@ class AppConfig:
         if any_calibration and not self.calibrated:
             raise ConfigError("Calibration is incomplete. Please calibrate again.")
         if require_calibration and not self.calibrated:
-            raise ConfigError("Select Calibrate and save the Run WHO button before starting.")
+            raise ConfigError("Select Calibrate and save a target template before starting.")
         if self.calibrated:
             self.monitor.validate()
             self.search_region.validate()
