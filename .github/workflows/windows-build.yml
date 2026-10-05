@@ -31,6 +31,7 @@ jobs:
           sudo apt-get install -y libegl1 libgl1 libxkbcommon0
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m ruff check .
+      - run: python -m ruff format --check .
       - run: python -m pytest -q
       - run: python -m loki --smoke-test --data-dir .smoke-data
 
@@ -71,7 +72,7 @@ jobs:
           BUILD_COMMIT: ${{ github.sha }}
           BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          printf '%s\n' 'Extract the entire Loki folder, open Loki.exe, and calibrate the Run WHO button.' 'Python is not needed. Detection and notifications only; all clicks are manual.' > release-notes.txt
+          printf '%s\n' 'Extract the entire Loki folder and open Loki.exe. Python is not needed.' 'Monitor Mode provides passive recognition, sound and highlighting; WoW profiles are Monitor Only.' 'Offline Automation adds explicit target binding, explicit arming, dry run and optional cursor movement/clicks with foreground safety checks. Every launch starts passive and disarmed.' > release-notes.txt
           gh release create "build-${BUILD_NUMBER}" package/Loki-Windows.zip \
-            --target "$BUILD_COMMIT" --title "Loki 0.1.0 (build ${BUILD_NUMBER})" \
+            --target "$BUILD_COMMIT" --title "Loki 0.2.0 (build ${BUILD_NUMBER})" \
             --notes-file release-notes.txt --latest

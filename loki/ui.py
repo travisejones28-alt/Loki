@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -36,7 +37,9 @@ from .alerts import AudioAlert
 from .calibration import CalibrationDialog, preview_pixmap
 from .config import STOP_KEYS, AppConfig, AppPaths, save_config
 from .engine import FrameReport, MonitorWorker
+from .modes import MonitorModeController, OfflineModeController
 from .overlay import TargetOverlay
+from .profiles import MONITOR, OFFLINE, WorkspaceConfig, save_workspace
 from .windows import IS_WINDOWS, register_stop_hotkey, set_startup, unregister_stop_hotkey
 
 STYLE = """
@@ -88,10 +91,11 @@ class StopHotkeyFilter(QAbstractNativeEventFilter):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, config: AppConfig, paths: AppPaths, parent=None):
+    def __init__(self, config: AppConfig, paths: AppPaths, parent=None, save_callback=None):
         super().__init__(parent)
         self.original = config
         self.paths = paths
+        self.save_callback = save_callback
         self.new_config = None
         self.setWindowTitle("Loki · Settings")
         self.setMinimumWidth(440)
@@ -170,7 +174,10 @@ class SettingsDialog(QDialog):
             candidate.validate()
             if startup_changed:
                 set_startup(candidate.start_with_windows)
-            save_config(candidate, self.paths)
+            if self.save_callback is None:
+                save_config(candidate, self.paths)
+            else:
+                self.save_callback(candidate)
         except Exception as exc:
             if startup_changed:
                 try:
@@ -234,7 +241,13 @@ class DiagnosticDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig, paths: AppPaths):
         super().__init__()
-        self.config = config
+        self.workspace = (
+            config if isinstance(config, WorkspaceConfig) else WorkspaceConfig.from_legacy(config)
+        )
+        self.config = self.workspace.runtime_detection
+        self.operating_mode = MONITOR  # Never restore or infer Offline Automation on startup.
+        self.controller = MonitorModeController(self.notify_report)
+        self.desktop_factory = None
         self.paths = paths
         self.logger = logging.getLogger("loki")
         self.worker = None
@@ -255,9 +268,32 @@ class MainWindow(QMainWindow):
         title = QLabel("LOKI")
         title.setObjectName("title")
         layout.addWidget(title)
-        subtitle = QLabel("WHO request alerts. You click Run WHO.")
+        subtitle = QLabel("Visual desktop assistant")
         subtitle.setObjectName("muted")
         layout.addWidget(subtitle)
+        profile_row = QHBoxLayout()
+        self.profile_combo = QComboBox()
+        self.profile_combo.currentIndexChanged.connect(self.select_profile)
+        profile_row.addWidget(self.profile_combo, 1)
+        add_profile = QPushButton("New profile")
+        add_profile.clicked.connect(self.add_profile)
+        profile_row.addWidget(add_profile)
+        edit_profile = QPushButton("Profile / Target")
+        edit_profile.clicked.connect(self.edit_profile)
+        profile_row.addWidget(edit_profile)
+        layout.addLayout(profile_row)
+        layout.addWidget(QLabel("OPERATING MODE"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Monitor — passive", MONITOR)
+        self.mode_combo.addItem("Offline Automation", OFFLINE)
+        self.mode_combo.currentIndexChanged.connect(self.operating_mode_changed)
+        layout.addWidget(self.mode_combo)
+        self.automation_status = QLabel("PASSIVE MONITORING · Input automation disabled")
+        self.automation_status.setWordWrap(True)
+        layout.addWidget(self.automation_status)
+        self.arm_button = QPushButton("ARM AUTOMATION")
+        self.arm_button.clicked.connect(self.toggle_arm)
+        layout.addWidget(self.arm_button)
         self.state = QLabel("STOPPED")
         self.state.setObjectName("state")
         layout.addWidget(self.state)
@@ -270,12 +306,14 @@ class MainWindow(QMainWindow):
         self.last_detection_label = QLabel("—")
         self.template_label = QLabel()
         self.fps_label = QLabel("0")
+        self.coordinates_label = QLabel("—")
         for label, value in (
             ("Selected monitor", self.monitor_label),
             ("Detection confidence", self.confidence_label),
             ("Last detection", self.last_detection_label),
             ("Current template", self.template_label),
             ("Capture FPS", self.fps_label),
+            ("Detected coordinates", self.coordinates_label),
         ):
             value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             form.addRow(label, value)
@@ -325,9 +363,217 @@ class MainWindow(QMainWindow):
         self._hotkey_filter = StopHotkeyFilter(self.emergency_stop)
         QApplication.instance().installNativeEventFilter(self._hotkey_filter)
         self._hotkey_registered = False
+        self._action_timer = QTimer(self)
+        self._action_timer.setInterval(50)
+        self._action_timer.timeout.connect(self.poll_actions)
+        self.refresh_profiles()
         self.refresh_config()
         self.register_hotkey()
         self.update_controls()
+
+    def refresh_profiles(self):
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        for profile in self.workspace.profiles:
+            self.profile_combo.addItem(
+                profile.name + (" [MONITOR ONLY]" if not profile.automation_capable else ""),
+                profile.id,
+            )
+        self.profile_combo.setCurrentIndex(
+            self.profile_combo.findData(self.workspace.active_profile_id)
+        )
+        self.profile_combo.blockSignals(False)
+
+    def persist_detection(self, config):
+        previous = self.workspace.active.detection
+        workspace = self.workspace.with_detection(config)
+        save_workspace(workspace, self.paths)
+        self.workspace = workspace
+        self.config = workspace.runtime_detection
+        self.set_operating_mode(MONITOR)
+        # Never remove a template still referenced by another profile.
+        referenced = {
+            name
+            for profile in workspace.profiles
+            for name in (profile.detection.template_path, profile.detection.context_path)
+        }
+        for name in (previous.template_path, previous.context_path):
+            old = self.paths.root / name
+            if (
+                name
+                and name not in referenced
+                and old.parent.resolve() == (self.paths.root / "templates").resolve()
+            ):
+                try:
+                    old.unlink(missing_ok=True)
+                except OSError:
+                    self.logger.warning("Old template cleanup failed: %s", name)
+
+    def select_profile(self, index):
+        profile_id = self.profile_combo.itemData(index)
+        if not profile_id or profile_id == self.workspace.active_profile_id:
+            return
+        self.set_operating_mode(MONITOR)
+        try:
+            workspace = replace(self.workspace, active_profile_id=profile_id)
+            save_workspace(workspace, self.paths)
+            self.workspace = workspace
+            self.config = workspace.runtime_detection
+            self.logger.info("PROFILE selected=%s", workspace.active.name)
+            self.refresh_config()
+            self.update_controls()
+        except Exception as exc:
+            self.refresh_profiles()
+            self.show_error(str(exc))
+
+    def add_profile(self):
+        self.set_operating_mode(MONITOR)
+        name, accepted = QInputDialog.getText(self, "New profile", "Profile name:")
+        if accepted and name.strip():
+            try:
+                workspace = self.workspace.add_profile(name)
+                save_workspace(workspace, self.paths)
+                self.workspace = workspace
+                self.config = workspace.runtime_detection
+                self.refresh_profiles()
+                self.refresh_config()
+                self.update_controls()
+            except Exception as exc:
+                self.show_error(str(exc))
+
+    def edit_profile(self):
+        self.set_operating_mode(MONITOR)
+        self.open_window()
+        from .profile_ui import ProfileDialog
+
+        dialog = ProfileDialog(
+            self.workspace, self.paths, self, desktop_factory=self.desktop_factory
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.new_workspace is not None:
+            self.workspace = dialog.new_workspace
+            self.config = self.workspace.runtime_detection
+            self.logger.info(
+                "PROFILE saved=%s TARGET WINDOW selected=%s",
+                self.workspace.active.name,
+                self.workspace.active.target,
+            )
+            self.refresh_profiles()
+            self.refresh_config()
+            self.update_controls()
+
+    def operating_mode_changed(self, index):
+        self.set_operating_mode(self.mode_combo.itemData(index))
+
+    def set_operating_mode(self, mode):
+        self.stop_monitoring()
+        if self._diagnostic is not None:
+            self._diagnostic.close()
+        self._action_timer.stop()
+        self.controller.close()
+        self.operating_mode = MONITOR
+        self.controller = MonitorModeController(self.notify_report)
+        try:
+            if mode == OFFLINE:
+                if not self.workspace.active.automation_capable:
+                    raise ValueError("MONITOR ONLY: Automation unavailable for this profile.")
+                if self.desktop_factory is None:
+                    from .desktop import WindowsDesktop
+
+                    self.desktop_factory = WindowsDesktop
+                desktop = self.desktop_factory()
+                try:
+                    self.controller = OfflineModeController(
+                        self.notify_report,
+                        self.workspace.active,
+                        self.workspace,
+                        desktop,
+                        self.verify_visual,
+                    )
+                except Exception:
+                    desktop.close()
+                    raise
+                self.operating_mode = OFFLINE
+                self._action_timer.start()
+            self.logger.info(
+                "MODE %s", "OfflineAutomation" if self.operating_mode == OFFLINE else "Monitor"
+            )
+        except Exception as exc:
+            self.show_error(str(exc))
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentIndex(self.mode_combo.findData(self.operating_mode))
+        self.mode_combo.blockSignals(False)
+        self.update_controls()
+
+    def verify_visual(self, expected):
+        if (
+            self.mode != "MONITORING"
+            or self.operating_mode != OFFLINE
+            or self.worker is None
+            or not self.worker.isRunning()
+            or self.worker.pipeline is None
+        ):
+            return None
+        return self.worker.pipeline.probe(expected)
+
+    def toggle_arm(self):
+        if self.operating_mode != OFFLINE or not self.workspace.active.automation_capable:
+            self.show_error("Monitor Mode cannot arm automation.")
+            return
+        if self.controller.armed:
+            self.controller.disarm("user disarmed")
+        else:
+            try:
+                if self.mode != "MONITORING" and not self._start(False):
+                    return
+                self.controller.arm()
+            except Exception as exc:
+                self.controller.disarm("arming validation failed")
+                self.show_error(str(exc))
+        self.update_controls()
+
+    def poll_actions(self):
+        if self.operating_mode == OFFLINE and self.mode == "MONITORING":
+            self.controller.poll()
+        self.update_automation_display()
+
+    def update_automation_display(self):
+        protected = not self.workspace.active.automation_capable
+        self.mode_combo.model().item(1).setEnabled(not protected and IS_WINDOWS)
+        self.arm_button.setVisible(self.operating_mode == OFFLINE and not protected)
+        self.arm_button.setText("DISARM AUTOMATION" if self.controller.armed else "ARM AUTOMATION")
+        if protected:
+            text = "MONITOR ONLY · Automation unavailable for this profile"
+        elif self.operating_mode == MONITOR:
+            text = "PASSIVE MONITORING · Input automation disabled"
+        else:
+            text = "OFFLINE AUTOMATION — " + ("ARMED" if self.controller.armed else "DISARMED")
+            text += " · " + self.workspace.active.action.upper()
+            if self.workspace.active.dry_run:
+                text += " · DRY RUN"
+            if self.controller.blocked:
+                text += "\nAUTOMATION TEMPORARILY BLOCKED: " + self.controller.blocked
+        self.automation_status.setText(text)
+        tooltip = "Loki · " + self.mode + " · " + text.replace("\n", " · ")
+        self.tray.setToolTip(tooltip)
+        icon = tray_icon(self.mode != "STOPPED", self.mode == "TESTING")
+        if self.operating_mode == OFFLINE:
+            pixmap = QPixmap(64, 64)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setBrush(
+                QColor(
+                    "#ff705e"
+                    if self.controller.blocked
+                    else "#dd8cff"
+                    if self.controller.armed
+                    else "#e4bc62"
+                )
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(4, 4, 56, 56, 14, 14)
+            painter.end()
+            icon = QIcon(pixmap)
+        self.tray.setIcon(icon)
 
     def refresh_config(self):
         monitor = self.config.monitor
@@ -376,6 +622,7 @@ class MainWindow(QMainWindow):
             self.tray_actions[name].setEnabled(not stopping)
         self.tray.setIcon(tray_icon(active, self.mode == "TESTING"))
         self.tray.setToolTip("Loki · " + self.mode)
+        self.update_automation_display()
 
     def show_error(self, message):
         self.details.setText(message)
@@ -408,7 +655,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(lambda run=token: self.on_worker_finished(run))
         self.mode = "TESTING" if diagnostic else "MONITORING"
         self.details.setText(
-            "Diagnostic preview only." if diagnostic else "ARMED · waiting for a WHO request"
+            "Diagnostic preview only." if diagnostic else "Waiting for a confirmed target"
         )
         self.logger.info(
             "%s started region=%s fps=%s", self.mode, self.config.search_region, self.config.fps
@@ -425,6 +672,7 @@ class MainWindow(QMainWindow):
         self._start(False)
 
     def stop_monitoring(self):
+        self.controller.disarm("monitoring stopped")
         previous = self.mode
         self._run_id += 1  # Discard queued frames so stopping can never emit a late alert.
         self.mode = "STOPPED"
@@ -447,19 +695,29 @@ class MainWindow(QMainWindow):
     def on_report(self, report: FrameReport, token):
         if token != self._run_id or self.mode == "STOPPED":
             return
-        result, update = report.result, report.update
+        result = report.result
         self.confidence_label.setText(f"{result.confidence:.3f}")
         self.fps_label.setText(f"{report.fps:.1f}")
         if self.mode == "TESTING":
             if self._diagnostic is not None:
                 self._diagnostic.update_report(report)
             return
+        self.coordinates_label.setText(f"{result.x}, {result.y} · {result.width} × {result.height}")
+        self.controller.consume(report)
+        self.update_automation_display()
+
+    def notify_report(self, report):
+        result, update = report.result, report.update
         self.details.setText(
-            "Request detected · manually click Run WHO"
+            (
+                "Target detected · manual click"
+                if self.operating_mode == MONITOR
+                else "Target detected · Offline Automation"
+            )
             if update.visible
             else "Waiting for disappearance confirmation"
             if update.state.value == "TRIGGERED"
-            else update.state.value + " · waiting for a WHO request"
+            else update.state.value + " · waiting for a target"
         )
         if update.triggered:
             self.last_detection_label.setText(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -492,7 +750,13 @@ class MainWindow(QMainWindow):
         if self._diagnostic is not None:
             self._diagnostic.close()
         try:
-            dialog = CalibrationDialog(self.config, self.paths, self)
+            dialog = CalibrationDialog(
+                self.config,
+                self.paths,
+                self,
+                save_callback=self.persist_detection,
+                target_label=self.workspace.active.name,
+            )
             if dialog.exec() == QDialog.DialogCode.Accepted and dialog.saved_config is not None:
                 self.config = dialog.saved_config
                 self.logger.info(
@@ -536,7 +800,7 @@ class MainWindow(QMainWindow):
         self.stop_monitoring()
         if self._diagnostic is not None:
             self._diagnostic.close()
-        dialog = SettingsDialog(self.config, self.paths, self)
+        dialog = SettingsDialog(self.config, self.paths, self, save_callback=self.persist_detection)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.new_config is not None:
             self.config = dialog.new_config
             self.refresh_config()
@@ -587,6 +851,8 @@ class MainWindow(QMainWindow):
         self.finish_exit()
 
     def finish_exit(self):
+        self._action_timer.stop()
+        self.controller.close()
         if self._hotkey_registered:
             unregister_stop_hotkey(int(self.winId()))
             self._hotkey_registered = False

@@ -111,7 +111,13 @@ def calibration_config(
 
 
 def save_calibration(
-    base: AppConfig, monitor: Monitor, search: Rect, button: Rect, frame, paths: AppPaths
+    base: AppConfig,
+    monitor: Monitor,
+    search: Rect,
+    button: Rect,
+    frame,
+    paths: AppPaths,
+    save_callback=None,
 ):
     assets = extract_assets(frame, search, button)
     identity = uuid.uuid4().hex
@@ -137,13 +143,16 @@ def save_calibration(
             path = paths.root / name
             new_paths.append(path)
             atomic_write(path, encoded.tobytes())
-        save_config(config, paths)
+        if save_callback is None:
+            save_config(config, paths)
+        else:
+            save_callback(config)
     except Exception:
         for path in new_paths:
             path.unlink(missing_ok=True)
         raise
     # Only remove old calibration assets owned by this app, after committing the new config.
-    for name in (base.template_path, base.context_path):
+    for name in () if save_callback is not None else (base.template_path, base.context_path):
         old = paths.root / name
         if (
             name
@@ -267,10 +276,19 @@ class RegionSelector(QDialog):
 
 
 class CalibrationDialog(QDialog):
-    def __init__(self, config: AppConfig, paths: AppPaths, parent=None):
+    def __init__(
+        self,
+        config: AppConfig,
+        paths: AppPaths,
+        parent=None,
+        save_callback=None,
+        target_label="Run WHO",
+    ):
         super().__init__(parent)
         self.config = config
         self.paths = paths
+        self.save_callback = save_callback
+        self.target_label = target_label
         self.saved_config = None
         self.frame = self.search = self.button = self.assets = None
         self.selected_monitor = None
@@ -280,8 +298,8 @@ class CalibrationDialog(QDialog):
         self.monitors = list_monitors()
         layout = QVBoxLayout(self)
         instructions = QLabel(
-            "Open the VoidLink WHO Request popup in WoW first.\n"
-            "Choose its monitor, select the search area, then select the complete Run WHO button.\n"
+            "Make the target visible in its application first.\n"
+            "Choose its monitor, select the search area, then select the complete target.\n"
             "Keep the pointer off the button while the screenshot is taken."
         )
         instructions.setWordWrap(True)
@@ -297,7 +315,7 @@ class CalibrationDialog(QDialog):
             )
             self.monitor_combo.setCurrentIndex(index)
         layout.addWidget(self.monitor_combo)
-        self.capture_button = QPushButton("Select area and Run WHO button")
+        self.capture_button = QPushButton("Select area and target (" + target_label + ")")
         self.capture_button.clicked.connect(self.begin_selection)
         layout.addWidget(self.capture_button)
         self.preview = QLabel("Your selected button will appear here.")
@@ -370,7 +388,7 @@ class CalibrationDialog(QDialog):
             selector = RegionSelector(
                 frame,
                 self.selected_monitor,
-                "Step 1 of 2: Select a small search area containing the whole WHO popup.",
+                "Step 1 of 2: Select a small search area containing the target and its context.",
             )
             if selector.exec() != QDialog.DialogCode.Accepted:
                 return
@@ -382,7 +400,7 @@ class CalibrationDialog(QDialog):
             selector = RegionSelector(
                 frame,
                 self.selected_monitor,
-                "Step 2 of 2: Select the Run WHO button, including its text and edges.",
+                "Step 2 of 2: Select the complete target, including its text and edges.",
                 search,
             )
             if selector.exec() != QDialog.DialogCode.Accepted:
@@ -450,7 +468,13 @@ class CalibrationDialog(QDialog):
             )
             validate_display(candidate, list_monitors())
             self.saved_config = save_calibration(
-                self.config, self.selected_monitor, self.search, self.button, self.frame, self.paths
+                self.config,
+                self.selected_monitor,
+                self.search,
+                self.button,
+                self.frame,
+                self.paths,
+                save_callback=self.save_callback,
             )
             self.accept()
         except Exception as exc:

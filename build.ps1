@@ -31,6 +31,8 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "Tests failed; no executable was built." }
             & $LokiPython -m ruff check .
             if ($LASTEXITCODE -ne 0) { throw "Source checks failed; no executable was built." }
+            & $LokiPython -m ruff format --check .
+            if ($LASTEXITCODE -ne 0) { throw "Formatting checks failed; no executable was built." }
         } finally { $env:QT_QPA_PLATFORM = $PreviousQtPlatform }
     }
     & $LokiPython -m PyInstaller --noconfirm --clean Loki.spec

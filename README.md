@@ -1,12 +1,19 @@
 # Loki
 
-Loki watches a small screen area for your VoidLink **Run WHO** button. It confirms the
-image over several frames, plays one short sound, and highlights the button. You move
-your mouse and click it yourself. After the popup disappears, Loki re-arms automatically.
+Loki is a visual desktop assistant with **Monitor Mode** and **Offline Automation Mode**.
+Both modes share the same region capture, template/context detector and appearance latch.
+Every launch starts in Monitor Mode with automated input disarmed.
 
-Loki uses ordinary screen capture and deterministic image matching. It runs visibly in
-the Windows tray. It does not move the pointer, click, send keystrokes, access game memory,
-inject code, hook the game, inspect traffic, or make network requests while running.
+For **World of Warcraft / VoidLink Run WHO**, use Monitor Mode only: Loki confirms the
+button across several frames, sounds once, highlights it and logs the match. **You manually
+move and click.** Monitor Mode has no input controller or route into the automation service.
+WoW profiles are Monitor Only and automated actions against identified WoW windows are blocked.
+
+Offline Automation is for explicitly permitted local applications. It supports alert only,
+cursor movement, or movement plus left-click, with separate explicit arming, target binding,
+dry run and fail-closed checks. Loki uses ordinary Windows APIs, no game memory, injection,
+keyboard synthesis, drivers, concealment, anti-cheat interference or network manipulation.
+Battle.net running by itself does **not** block a permitted target.
 
 ## Install on Windows
 
@@ -16,7 +23,7 @@ inject code, hook the game, inspect traffic, or make network requests while runn
 3. Open `Loki\Loki.exe`. Keep its `_internal` folder beside the executable.
 
 The executable is built on Windows by GitHub Actions after source tests pass. The download
-link becomes available when the first Windows build and release finish. If no release is
+link tracks the latest tested release. If no release is
 available, check [Actions](https://github.com/travisejones28-alt/Loki/actions), or build locally
 with the command below. Python is not needed to run the extracted Windows package.
 
@@ -79,9 +86,62 @@ and calibration pause monitoring. The **Test sound** button lets you check the l
 actual audio output. Four confirmation frames are a good starting point.
 
 **Start Loki with Windows** uses the normal current-user Windows `Run` registry entry named
-`Loki`. It launches in the tray and starts monitoring using saved calibration. No administrator
+`Loki`. It launches in the tray and starts **passive Monitor Mode** using saved calibration.
+It cannot select Offline Automation or arm input. No administrator
 rights or service are needed. Turn it off to remove that entry. Set it again if you move the
 application folder. **Begin monitoring when I open Loki** independently controls manual launches.
+
+## Profiles and Offline Automation
+
+1. Select **New Profile**, name the permitted local application, then **Profile / Target**.
+2. Select **Refresh running windows**, choose its executable/PID/window, and **Bind selected
+   running window**. Loki reads ordinary window and process identity metadata. It saves the
+   full executable path, filename, PID, creation identity, window handle/class/title and bounds.
+3. Choose **Alert only**, **Move cursor to target**, or **Move cursor and left-click**.
+   Set **Action delay** between 0 and 5000 ms. Keep **Dry Run** enabled for initial testing.
+4. Save, calibrate that profile’s target and context, and use Test Detection to check matching.
+5. Explicitly choose **Offline Automation**. The UI shows **DISARMED**. Select **ARM
+   AUTOMATION**, return to the bound application, and cause a fresh target appearance.
+6. Dry Run performs safety/delay/fresh-image checks and logs `DRY RUN WOULD CLICK x=… y=…`
+   (or MOVE). It never constructs or calls the Windows input backend. Inspect the log before
+   disabling Dry Run in Profile / Target and explicitly arming again.
+
+Alert only never creates an input backend. Live movement/click acts once at the **center of
+that confirmed target**, within the monitor, capture area and bound window’s client bounds.
+An independent hard input limiter allows at most one action per second and 30 per minute.
+The cursor remains free; manual input or substantial movement cancels delayed actions.
+
+The exact bound window/process must still exist and be foreground. Restarting the target,
+changing its handle, title (unless an explicit wildcard is configured), bounds, executable,
+monitor or DPI blocks/disarms automation: rebind and check calibration. Covered targets are
+blocked. Missing/unverifiable metadata fails closed. The same detector takes a fresh ROI
+image immediately before dispatch; disappeared or moved targets are cancelled.
+
+**Alt-Tab to WoW blocks automation and cancels pending actions**, while Loki keeps running.
+A desktop foreground-change event counter also invalidates away/back transitions between
+capture frames. Returning to a permitted window never executes the old action: the latched
+appearance must disappear and a fresh confirmed appearance must occur. Built-in protection
+checks WoW retail/classic/test executable names, installation-path components, window titles,
+classes and executable version metadata. Profile / Target → Protected applications lets you
+add wildcard executable/title/full-path rules, without removing built-in WoW protections.
+A WoW-bound/named profile is forced Monitor Only; arming controls are unavailable.
+
+Stop, emergency stop (**Ctrl+Shift+F11**, configurable F6–F11), mode/profile changes, opening
+calibration/settings/target binding or diagnostic testing disarm and cancel pending actions.
+Queued capture reports are invalidated on stop. No armed state is saved, and no CLI option
+arms automation. Startup flags always mean passive monitoring.
+
+The UI and tray tooltip explicitly identify Monitor, diagnostic, Offline Automation
+Disarmed/Armed and blocked states. Offline tray colors are amber (disarmed), purple (armed)
+and coral (blocked); read the text as well. Selecting Start in Offline Mode starts capture
+only and never arms input. An alert/highlight can still occur while input is disarmed/blocked.
+
+Windows `SendInput` is global: the final foreground/protected-window check and dispatch are
+not an atomic OS operation. Loki repeats checks directly before dispatch and cancels observed
+focus transitions, but no ordinary user-space implementation can promise zero race time
+against a simultaneous foreground switch or identify every adversarially altered executable.
+**Use Monitor Mode whenever WoW is in use**; its structural absence of input generation is
+the unconditional passive guarantee. No anti-cheat detection or evasion is attempted.
 
 ## Configuration, logs, and screenshots
 
@@ -90,13 +150,19 @@ All user data stays locally in `%LOCALAPPDATA%\Loki`:
 | Location | Contents |
 | --- | --- |
 | `config.json` | Readable settings, physical search coordinates, monitor identity, DPI, templates |
-| `templates\` | The current button and popup-context PNGs |
+| `templates\` | Each profile’s button and context PNGs |
 | `logs\loki.log` | Startup, calibration, capture, candidate, confirmed detection, loss and errors |
 | `debug\` | Optional annotated detection screenshots; newest 20 only |
 
-Settings has **Open data folder**. Configuration saves are atomic. Unreadable configurations
+Settings has **Open data folder**. Configuration saves are atomic. Schema 2 stores named profiles with independent calibration,
+thresholds, FPS, notifications, mode/action/delay/dry-run settings and target binding. Global
+startup/hotkey settings and extra denylist rules stay at the workspace level. Schema 1 is
+migrated automatically to **WoW - VoidLink WHO / MONITOR ONLY** with all existing settings
+and image paths preserved, without recalibration. A byte-identical `config.v1.backup.json`
+is saved before migration. No arming flag exists in the file. Unreadable configurations
 are preserved as `config.corrupt-*.json` (newest three) and monitoring requires fresh calibration.
-Logs rotate at approximately 512 KB, with three backups. Regular frames and confidence scores
+Logs rotate at approximately 512 KB, with three backups. Profile/mode/arming, protected foreground, pending/cancelled actions, rate limits, dry runs
+and emergency stop are also logged. Regular frames and confidence scores
 are displayed but not written to disk; coordinates and confidence are logged on important events.
 Debug screenshots are disabled by default and saved only on confirmed appearances.
 
@@ -149,7 +215,8 @@ py -3.12 -m venv .venv
 
 Useful options: `--tray`, `--monitor`, `--data-dir "C:\Loki-TestData"`, `--version`, and
 `--smoke-test`. `--smoke-test` checks GUI initialization and clean exit without capturing.
-The test suite uses synthetic images and an offscreen Qt UI; it does not require WoW.
+The test suite uses synthetic images, fake desktop metadata, fake input senders and an
+offscreen Qt UI. It does not require WoW and **never moves/clicks a CI runner mouse**.
 
 GitHub Actions tests Linux and Windows, builds and smoke-tests the executable on Windows,
 uploads `Loki-Windows.zip`, then publishes the successful main-branch build as a release.
@@ -179,7 +246,8 @@ confirmation/disappearance, persisted calibration, DPI conversion at 100/125/150
 diagnostic isolation, GUI selection, notification routing, and bounded logs/screenshots.
 Packaged smoke tests verify launch and clean exit. A live Windows/WoW check is still needed
 to confirm your actual button image, mixed-monitor placement, click-through behavior and
-speaker output. Synthetic/offscreen checks cannot certify those hardware conditions.
+speaker output. Offline input must be manually validated against a harmless local test
+application after dry-run validation; automated tests inject fakes. Synthetic/offscreen checks cannot certify those hardware conditions.
 
 ## Implementation references
 

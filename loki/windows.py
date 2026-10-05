@@ -1,6 +1,8 @@
 """Normal Win32 display, notification-window, hotkey and per-user startup APIs.
 
-There are no game handles, game hooks, mouse movement, clicks or keystroke synthesis.
+This passive-support module never generates input. Offline mouse input is isolated
+in input_controller.py and guarded by explicit mode, arming and target validation.
+There are no game hooks, injection, or process-memory reads in either path.
 """
 
 from __future__ import annotations

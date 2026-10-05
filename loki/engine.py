@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -24,6 +24,28 @@ class FrameReport:
     update: StateUpdate
     fps: float
     frame: np.ndarray | None = None
+    captured_at: float = field(default_factory=time.monotonic)
+
+
+class VisualPipeline:
+    """One detector shared by continuous recognition and the final action-time probe."""
+
+    def __init__(self, config, paths):
+        self.config = config
+        self.detector = TemplateDetector.from_config(config, paths.root)
+        self._lock = threading.RLock()
+
+    def detect(self, frame, origin):
+        with self._lock:
+            return self.detector.detect(frame, origin)
+
+    def probe(self, expected):
+        validate_display(self.config, list_monitors())
+        region = self.config.search_region
+        with ScreenCapture() as capture:
+            frame = capture.grab(region)
+        result = self.detect(frame, (region.left, region.top))
+        return result if result.matched and result.bounds == expected.bounds else None
 
 
 class MonitorWorker(QThread):
@@ -46,6 +68,7 @@ class MonitorWorker(QThread):
         self.capture_factory = capture_factory
         self.monitor_provider = monitor_provider
         self._stop = threading.Event()
+        self.pipeline = None
 
     def stop(self):
         self._stop.set()
@@ -56,7 +79,7 @@ class MonitorWorker(QThread):
             cv2.setNumThreads(1)  # Avoid competing with WoW for a pool of worker threads.
             self.config.validate(require_calibration=True)
             validate_display(self.config, self.monitor_provider())
-            detector = TemplateDetector.from_config(self.config, self.paths.root)
+            self.pipeline = VisualPipeline(self.config, self.paths)
             latch = DetectionLatch(
                 self.config.confirmation_frames, self.config.disappearance_frames
             )
@@ -75,7 +98,7 @@ class MonitorWorker(QThread):
                         validate_display(self.config, self.monitor_provider())
                         last_display_check = started
                     frame = capture.grab(region)
-                    result = detector.detect(frame, origin)
+                    result = self.pipeline.detect(frame, origin)
                     if self._stop.is_set():
                         break
                     update = latch.update(result)
@@ -97,7 +120,7 @@ class MonitorWorker(QThread):
                                 result.width,
                                 result.height,
                             )
-                            logger.info("TRIGGER target=RunWHO")
+                            logger.info("TRIGGER target=%s", self.config.template_path)
                             if self.config.debug_screenshots:
                                 try:
                                     save_debug_image(self.paths, frame, result, origin)
@@ -120,7 +143,11 @@ class MonitorWorker(QThread):
                     if not self.diagnostic or frames == 1 or started - last_report >= 0.2:
                         self.report.emit(
                             FrameReport(
-                                result, update, actual_fps, frame if self.diagnostic else None
+                                result,
+                                update,
+                                actual_fps,
+                                frame if self.diagnostic else None,
+                                started,
                             )
                         )
                         last_report = started

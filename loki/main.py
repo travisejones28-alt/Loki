@@ -12,12 +12,16 @@ from .windows import enable_dpi_awareness
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Loki · passive visual WHO request alerts")
+    parser = argparse.ArgumentParser(
+        description="Loki · visual desktop assistant · passive startup"
+    )
     parser.add_argument(
         "--tray", action="store_true", help="Start minimized if a system tray is available"
     )
     parser.add_argument(
-        "--monitor", action="store_true", help="Begin monitoring with an existing calibration"
+        "--monitor",
+        action="store_true",
+        help="Begin passive Monitor Mode with an existing calibration",
     )
     parser.add_argument("--data-dir", type=Path, help="Use a separate configuration folder")
     parser.add_argument(
@@ -33,8 +37,9 @@ def main(argv=None):
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtWidgets import QApplication, QMessageBox
 
-    from .config import AppPaths, load_config
+    from .config import AppPaths
     from .logging_utils import setup_logging
+    from .profiles import load_workspace
     from .ui import STYLE, MainWindow
 
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
@@ -61,13 +66,25 @@ def main(argv=None):
             return 0
         logger = setup_logging(paths)
         logger.info("Application startup version=%s platform=%s", __version__, sys.platform)
-        config, warning = load_config(paths)
+        config, warning = load_workspace(paths)
         window = MainWindow(config, paths)
         if not args.tray or not window.tray_available or warning or args.smoke_test:
             window.show()
         if warning and not args.smoke_test:
             QTimer.singleShot(0, lambda: window.show_error(warning))
         if args.smoke_test:
+            from .modes import MonitorModeController
+
+            assert (
+                isinstance(window.controller, MonitorModeController) and not window.controller.armed
+            )
+            # Packaging check for the lazy metadata module, never for OS input generation.
+            if sys.platform == "win32":
+                from .desktop import WindowsDesktop
+
+                desktop = WindowsDesktop()
+                desktop.close()
+            logger.info("SMOKE passive startup verified; no automated input")
             QTimer.singleShot(300, window.exit_app)
         elif args.monitor or config.monitor_on_launch:
             QTimer.singleShot(100, window.start_monitoring)
